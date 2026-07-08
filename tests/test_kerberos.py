@@ -48,7 +48,7 @@ def make_negotiate_response(
 class KerberosHelperTests(unittest.TestCase):
     def test_version_metadata_is_importable(self) -> None:
         self.assertEqual(version_module.__title__, "httpx2_kerberos")
-        self.assertEqual(version_module.__version__, "2.0.0")
+        self.assertEqual(version_module.__version__, "2.0.1")
 
     def test_cached_cert_expired_compares_against_current_time(self) -> None:
         expired = CachedCert(
