@@ -77,6 +77,7 @@ def format_auth_header(auth_header: str | None) -> str | None:
     """Limit length of authorization header to 75 characters."""
     if auth_header is not None and len(auth_header) > 75:
         return auth_header[:48] + "..." + auth_header[-24:]
+    return auth_header
 
 
 def negotiate_value(response: Response) -> bytes | None:

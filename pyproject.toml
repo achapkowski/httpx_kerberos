@@ -1,10 +1,11 @@
 [build-system]
-requires = ["hatchling", "hatch-fancy-pypi-readme"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "httpx2_kerberos"
 description = "Kerberos authentication for HTTPX2 (forked from HTTPX-Kerberos)"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10,<4.0"
 authors = [
@@ -13,7 +14,6 @@ authors = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -26,29 +26,17 @@ classifiers = [
     "Programming Language :: Python :: 3.14"
 ]
 dependencies = [
-    "cryptography>=42.0.0",
+    "cryptography>=46.0.0",
     "httpx2>=2.2.0,<3.0.0",
     "pyspnego>=0.12.1; sys_platform == 'win32'",
     "pyspnego[kerberos]>=0.12.1; sys_platform != 'win32'",
 ]
-dynamic = ["readme", "version"]
+dynamic = ["version"]
 
 
 [project.urls]
 Homepage = "https://github.com/achapkowski/httpx_kerberos"
 Source = "https://github.com/achapkowski/httpx_kerberos"
 
-[tool.hatch.version]
-path = "./httpx2_kerberos/__version__.py"
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/httpx2_kerberos",
-    "/README.md",
-]
-
-[tool.hatch.metadata.hooks.fancy-pypi-readme]
-content-type = "text/markdown"
-
-[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
-path = "README.md"
+[tool.setuptools.dynamic]
+version = { attr = "httpx2_kerberos.__version__.__version__" }
