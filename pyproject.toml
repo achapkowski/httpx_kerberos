@@ -38,8 +38,9 @@ docs = [
 
 
 [project.urls]
-Homepage = "https://github.com/achapkowski/httpx_kerberos"
-Source = "https://github.com/achapkowski/httpx_kerberos"
+Homepage = "https://github.com/achapkowski/httpx2_kerberos"
+Source = "https://github.com/achapkowski/httpx2_kerberos"
+Documentation = "https://achapkowski.github.io/httpx2_kerberos/"
 
 [tool.setuptools.dynamic]
 version = { attr = "httpx2_kerberos.__version__.__version__" }
