@@ -1,3 +1,16 @@
+"""Kerberos authentication support for ``httpx2``.
+
+The main entry point is :class:`HTTPKerberosAuth`, an ``httpx2.Auth``
+implementation that responds to ``WWW-Authenticate: Negotiate`` challenges by
+creating Kerberos/SPNEGO tokens with ``pyspnego``.
+
+Example:
+    >>> from httpx2_kerberos import HTTPKerberosAuth
+    >>> auth = HTTPKerberosAuth(hostname_override="kerberos.example.test")
+    >>> auth.hostname_override
+    'kerberos.example.test'
+"""
+
 from __future__ import annotations
 
 import base64
@@ -5,6 +18,7 @@ import logging
 import re
 import ssl
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -49,6 +63,19 @@ class CachedCert:
 
 
 class MutualAuthentication(IntEnum):
+    """Mutual authentication policy for :class:`HTTPKerberosAuth`.
+
+    ``REQUIRED`` verifies successful responses by default.
+    ``OPTIONAL`` accepts responses from servers that do not advertise mutual authentication.
+    ``DISABLED`` skips server authentication entirely.
+
+    Example:
+        >>> MutualAuthentication.REQUIRED.value
+        1
+        >>> MutualAuthentication(MutualAuthentication.DISABLED) == MutualAuthentication.DISABLED
+        True
+    """
+
     REQUIRED = 1
     OPTIONAL = 2
     DISABLED = 3
@@ -118,7 +145,9 @@ def get_certificate_hash(
     return certificate_hash
 
 
-def get_channel_bindings_application_data(response: Response) -> tuple[x509.Certificate, bytes] | tuple[None, None]:
+def get_channel_bindings_application_data(
+    response: Response,
+) -> tuple[x509.Certificate, bytes] | tuple[None, None]:
     """https://tools.ietf.org/html/rfc5929 4. The 'tls-server-end-point' Channel
     Binding Type.
 
@@ -156,12 +185,53 @@ def get_channel_bindings_application_data(response: Response) -> tuple[x509.Cert
     if certificate_hash is not None:
         application_data = b"tls-server-end-point:" + certificate_hash
         return cert, application_data
-    
+
     return None, None
 
 
 class HTTPKerberosAuth(Auth):
-    """Generates the HTTP GSSAPI/Kerberos Authentication header for a request."""
+    """HTTPX2 authentication class for Kerberos/Negotiate challenges.
+
+    The object is passed to ``httpx2`` as the ``auth`` argument. It sends the
+    original request first, handles a ``401`` response with a
+    ``WWW-Authenticate: Negotiate`` challenge, and then retries the request with
+    an ``Authorization: Negotiate`` header.
+
+    :param mutual_authentication: Mutual authentication policy. Values are
+        coerced to :class:`MutualAuthentication`.
+    :param service: Kerberos service name. HTTP services normally use
+        ``"HTTP"``.
+    :param delegate: Request credential delegation when the server supports it.
+    :param principal: Optional client principal. On Windows this may include a
+        password as ``"user@REALM:password"``.
+    :param hostname_override: Kerberos hostname to use instead of the request
+        hostname, or a mapping from request hostname to Kerberos hostname. A
+        missing mapping key falls back to the request hostname.
+    :param sanitize_mutual_error_response: When mutual authentication is
+        required, strip unauthenticated error responses before returning them.
+    :param send_cbt: Send TLS channel binding data when it can be retrieved.
+
+    Example:
+        >>> from httpx2_kerberos import HTTPKerberosAuth, MutualAuthentication
+        >>> auth = HTTPKerberosAuth(mutual_authentication=MutualAuthentication.OPTIONAL)
+        >>> auth.mutual_authentication == MutualAuthentication.OPTIONAL
+        True
+
+    Single-host alias example:
+        >>> auth = HTTPKerberosAuth(hostname_override="internal.example.test")
+        >>> auth.hostname_override
+        'internal.example.test'
+
+    Multi-host alias example:
+        >>> auth = HTTPKerberosAuth(
+        ...     hostname_override={
+        ...         "external-a.example.test": "internal-a.example.test",
+        ...         "external-b.example.test": "internal-b.example.test",
+        ...     }
+        ... )
+        >>> auth.hostname_override["external-a.example.test"]
+        'internal-a.example.test'
+    """
 
     def __init__(
         self,
@@ -169,10 +239,29 @@ class HTTPKerberosAuth(Auth):
         service: str = "HTTP",
         delegate: bool = False,
         principal: str | None = None,
-        hostname_override: str | None = None,
+        hostname_override: str | Mapping[str, str] | None = None,
         sanitize_mutual_error_response: bool = True,
         send_cbt: bool = True,
     ):
+        """Initialize a Kerberos authentication handler.
+
+        :param mutual_authentication: Mutual authentication policy. Integer
+            values are converted to :class:`MutualAuthentication`.
+        :param service: Kerberos service component used when constructing the
+            service principal name. HTTP services normally use ``"HTTP"``.
+        :param delegate: Request delegated credentials from the Kerberos
+            backend when the server supports delegation.
+        :param principal: Optional client principal. A value containing one
+            colon is split into ``username`` and ``password`` before calling
+            ``spnego.client``.
+        :param hostname_override: Kerberos hostname override. A string applies
+            to every request. A mapping applies per request host and falls back
+            to the request host when a key is missing.
+        :param sanitize_mutual_error_response: Strip unauthenticated error
+            responses when mutual authentication is required.
+        :param send_cbt: Attempt TLS channel binding for HTTPS requests.
+        """
+
         self._context: dict[str, spnego.ContextProxy] = {}
         self.mutual_authentication = MutualAuthentication(mutual_authentication)
         self.delegate = delegate
@@ -187,8 +276,41 @@ class HTTPKerberosAuth(Auth):
         self.send_cbt = send_cbt
         self._cbts: dict[str, spnego.channel_bindings.GssChannelBindings | None] = {}
 
+    def _kerberos_hostname(self, host: str) -> str:
+        """Resolve the Kerberos target hostname for a request host.
+
+        A string ``hostname_override`` is returned for every host. A mapping
+        override is looked up by request host and falls back to ``host`` when no
+        mapping entry exists.
+
+        :param host: Hostname from the request URL.
+        :returns: Hostname to pass to ``spnego.client``.
+        """
+
+        if isinstance(self.hostname_override, str):
+            return self.hostname_override
+        if self.hostname_override is not None:
+            return self.hostname_override.get(host, host)
+        return host
+
     def auth_flow(self, request: Request) -> Generator[Request, Response, None]:
-        """Execute the kerberos auth flow."""
+        """Execute the HTTPX2 Kerberos authentication flow.
+
+        The flow sends the original request first. For a ``401`` response with
+        a Negotiate challenge, it prepares channel binding data when enabled,
+        adds an ``Authorization`` header to the request, and yields the request
+        again. Non-``401`` responses are passed to :meth:`handle_other` for
+        optional mutual authentication.
+
+        :param request: Request being authenticated.
+        :yields: The original request and, when Kerberos is supported, the
+            authenticated retry request.
+        :raises MutualAuthenticationError: If a response cannot be mutually
+            authenticated when required.
+        :raises KerberosExchangeError: If the Kerberos backend fails while
+            generating an authorization token.
+        """
+
         # send the initial request
         response = yield request
         if response.status_code != 401:
@@ -202,7 +324,7 @@ class HTTPKerberosAuth(Auth):
             port = request.url.port
             if not port:
                 port = 443 if scheme == "https" else 80
-            
+
             cached_cert = _cached_certs.get(host)
             if cached_cert is not None and not cached_cert.expired:
                 _LOGGER.debug("Cached cert hit at %s:%i", host, port)
@@ -216,7 +338,7 @@ class HTTPKerberosAuth(Auth):
                 assert host in self._cbts
                 _cached_certs.pop(host)
                 self._cbts.pop(host)
-            
+
             if host not in self._cbts:
                 cert, application_data = get_channel_bindings_application_data(response)
                 if cert:
@@ -245,7 +367,15 @@ class HTTPKerberosAuth(Auth):
         return
 
     def handle_auth_error(self, request: Request, response: Response) -> None:
-        """Handles 401's, attempts to use gssapi/kerberos authentication"""
+        """Handle a ``401`` response and attempt Kerberos authentication.
+
+        :param request: Request that will receive the ``Authorization`` header.
+        :param response: ``401`` response containing a possible Negotiate
+            challenge.
+        :raises KerberosUnsupported: If the response does not include a
+            ``WWW-Authenticate: Negotiate`` token.
+        :raises KerberosExchangeError: If token generation fails.
+        """
 
         _LOGGER.debug("Handling %i", response.status_code)
         if negotiate_value(response) is not None:
@@ -255,9 +385,17 @@ class HTTPKerberosAuth(Auth):
             raise KerberosUnsupported()
 
     def handle_other(self, response: Response) -> None:
-        """Handles all responses with the exception of 401s.
+        """Handle non-``401`` responses and enforce mutual authentication.
 
-        This is necessary so that we can authenticate responses if requested.
+        Successful responses must include a valid server authentication token
+        when mutual authentication is required. Error responses may be returned
+        as-is, sanitized, or allowed depending on ``mutual_authentication`` and
+        ``sanitize_mutual_error_response``.
+
+        :param response: Response returned after the initial request or
+            authenticated retry.
+        :raises MutualAuthenticationError: If mutual authentication is required
+            and the response cannot be authenticated.
         """
         _LOGGER.debug("Handling %i", response.status_code)
         if (
@@ -310,9 +448,16 @@ class HTTPKerberosAuth(Auth):
             _LOGGER.debug("Skipping mutual authentication, returning %r", response)
 
     def authenticate_user(self, request: Request, response: Response) -> None:
-        """Handles user authentication with gssapi/kerberos.
+        """Add a Kerberos ``Authorization`` header to a request.
 
-        Manipulates request headers in place.
+        The request is mutated in place because HTTPX2 auth flows retry the
+        same request object after the ``401`` challenge.
+
+        :param request: Request to update with an authorization header.
+        :param response: Challenge response used to continue the SPNEGO
+            exchange.
+        :raises KerberosExchangeError: If the Kerberos backend fails while
+            generating the request token.
         """
 
         host = request.url.host
@@ -322,9 +467,12 @@ class HTTPKerberosAuth(Auth):
         _LOGGER.debug("%r", response)
 
     def authenticate_server(self, response: Response) -> bool:
-        """Uses GSSAPI to authenticate the server.
+        """Authenticate a server response token with the stored context.
 
-        Returns `True` on success, `False` on failure.
+        :param response: Response containing a ``WWW-Authenticate: Negotiate``
+            server token.
+        :returns: ``True`` when the server token is accepted, otherwise
+            ``False``.
         """
 
         response_token = negotiate_value(response)
@@ -343,11 +491,19 @@ class HTTPKerberosAuth(Auth):
         return True
 
     def generate_request_header(self, response: Response, host: str) -> str:
-        """Generates the GSSAPI authentication token with kerberos.
+        """Generate the value for an ``Authorization`` header.
 
-        If any GSSAPI step fails, raise
-        :class: `KerberosExchangeError <pi_web.exceptions.KerberosExchangeError`
-        with failure detail.
+        This creates a new ``spnego.client`` context for ``host``, performs one
+        context step using the server token from ``response``, stores the
+        context for later mutual authentication, and returns a header value in
+        the form ``"Negotiate <base64-token>"``.
+
+        :param response: Challenge response containing the server token.
+        :param host: Request host used to key the authentication context and
+            channel binding cache.
+        :returns: Complete ``Authorization`` header value.
+        :raises KerberosExchangeError: If context initialization or stepping
+            fails in the Kerberos backend.
         """
 
         # flags used by kerberos module
@@ -363,9 +519,7 @@ class HTTPKerberosAuth(Auth):
             # allows use of an arbitrary hostname for the kerberos exchange
             # (eg, in cases of aliased hosts, internal vs external, CNAMEs
             # w/ name-based HTTP hosting)
-            kerb_host = (
-                self.hostname_override if self.hostname_override is not None else host
-            )
+            kerb_host = self._kerberos_hostname(host)
 
             # split principal into user and password if defined
             username = self.principal

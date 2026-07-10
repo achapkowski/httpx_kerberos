@@ -96,6 +96,19 @@ setting the ``hostname_override`` arg:
     >>> r = httpx2.get("https://externalhost.example.org/", auth=kerberos_auth)
     ...
 
+For clients that make requests to multiple hosts, ``hostname_override`` can
+also map request hostnames to Kerberos hostnames. Hosts missing from the mapping
+use their request hostname:
+
+    >>> kerberos_auth = HTTPKerberosAuth(
+    ...     hostname_override={
+    ...         "external-a.example.org": "internal-a.local",
+    ...         "external-b.example.org": "internal-b.local",
+    ...     }
+    ... )
+    >>> r = httpx2.get("https://external-a.example.org/", auth=kerberos_auth)
+    ...
+
 Explicit Principal
 ------------------
 

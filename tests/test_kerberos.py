@@ -4,6 +4,7 @@ import base64
 import unittest
 import warnings
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import version as package_version
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -48,7 +49,10 @@ def make_negotiate_response(
 class KerberosHelperTests(unittest.TestCase):
     def test_version_metadata_is_importable(self) -> None:
         self.assertEqual(version_module.__title__, "httpx2_kerberos")
-        self.assertEqual(version_module.__version__, "2.0.1")
+        self.assertEqual(
+            version_module.__version__,
+            package_version("httpx2_kerberos"),
+        )
 
     def test_cached_cert_expired_compares_against_current_time(self) -> None:
         expired = CachedCert(
@@ -517,6 +521,34 @@ class HTTPKerberosAuthTests(unittest.TestCase):
             auth.generate_request_header(response, "www.example.org")
 
         self.assertEqual(client.call_args.kwargs["hostname"], "otherhost.otherdomain.org")
+
+    def test_generate_request_header_uses_hostname_override_mapping(self) -> None:
+        response = make_negotiate_response("http://www.example.org/")
+        auth = HTTPKerberosAuth(
+            hostname_override={"www.example.org": "otherhost.otherdomain.org"},
+            send_cbt=False,
+        )
+        context = Mock()
+        context.step.return_value = b"GSSRESPONSE"
+
+        with patch("httpx2_kerberos.kerberos.spnego.client", return_value=context) as client:
+            auth.generate_request_header(response, "www.example.org")
+
+        self.assertEqual(client.call_args.kwargs["hostname"], "otherhost.otherdomain.org")
+
+    def test_generate_request_header_uses_request_host_for_missing_hostname_override_mapping(self) -> None:
+        response = make_negotiate_response("http://www.example.org/")
+        auth = HTTPKerberosAuth(
+            hostname_override={"api.example.org": "kerberos.example.org"},
+            send_cbt=False,
+        )
+        context = Mock()
+        context.step.return_value = b"GSSRESPONSE"
+
+        with patch("httpx2_kerberos.kerberos.spnego.client", return_value=context) as client:
+            auth.generate_request_header(response, "www.example.org")
+
+        self.assertEqual(client.call_args.kwargs["hostname"], "www.example.org")
 
     def test_generate_request_header_raises_exchange_error_when_context_init_fails(self) -> None:
         response = make_negotiate_response("http://www.example.org/")
