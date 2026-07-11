@@ -1,4 +1,7 @@
-**This is a fork from httpx-kerberos remade for httpx2**
+![PyPI Python Version](https://img.shields.io/pypi/pyversions/httpx2-kerberos)
+![Pepy Total Downloads](https://img.shields.io/pepy/dt/httpx2-kerberos)
+
+**Inspired by `httpx-kerberos` and rebuilt for `httpx2`.**
 
 
 HTTPX2 Kerberos/GSSAPI Authentication Library
@@ -12,6 +15,12 @@ authentication. Basic GET usage:
     >>> from httpx2_kerberos import HTTPKerberosAuth
     >>> r = httpx2.get("http://example.org", auth=HTTPKerberosAuth())
     ...
+
+
+Installation
+------------
+
+```pip install httpx2-kerberos ```
 
 Setup
 -----
